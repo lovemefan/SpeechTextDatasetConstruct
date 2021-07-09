@@ -116,22 +116,27 @@ def split_text(
     """
 
     print(f'Splitting text in {in_file} into sentences.')
-    with open(in_file, "r") as f:
+    with open(in_file, "r", encoding='utf-8') as f:
         transcript = f.read()
 
     # remove some symbols for better split into sentences
     transcript = (
-        transcript.replace("\n", " ")
+        transcript
+        .replace("\n\n", "\n")
         .replace("\t", " ")
-        .replace("…", "...")
+        .replace("…", "")
         .replace("\\", " ")
         .replace("--", " -- ")
         .replace(". . .", "...")
         .replace("‘", "’")
+        .replace("“", "")
+        .replace("”", "")
     )
     # remove extra space
     transcript = re.sub(r' +', ' ', transcript)
     transcript = re.sub(r'(\.+)', '. ', transcript)
+    # remove (*)
+    transcript = re.sub(r'\(.*?\)', '', transcript)
 
     if remove_brackets:
         transcript = re.sub(r'(\[.*?\])', ' ', transcript)
@@ -139,7 +144,7 @@ def split_text(
         transcript = re.sub(r'(\{.*?\})', ' ', transcript)
 
     zh_unicode = '\u4E00-\u9FA5'
-    vi_unicode = '\u0102 - \u1EF1'
+    vi_unicode = '\u0102-\u1EF1'
 
     if language not in ['zh', 'en', 'vi']:
         print(f'Consider using {language} unicode letters for better sentence split.')
@@ -159,7 +164,7 @@ def split_text(
     sentences = [s.strip() for s in sentences if s.strip()]
 
     # Read and split transcript by utterance (roughly, sentences)
-    split_pattern = f"(?<!\w\.\w.)(?<![A-Z{vi_unicode}][A-Z{zh_unicode}][a-z{zh_unicode}]\.)(?<![A-Z{zh_unicode}]\.)(?<=\.|\?|\!|\.”|\?”\!”)\s"
+    split_pattern = f"(?<!\w\.\w.)(?<![A-Z{vi_unicode}][A-Z{zh_unicode}][a-z{vi_unicode}][a-z{zh_unicode}]\.)(?<![A-Z{zh_unicode}]\.)(?<=\.|\。|\?|\？|\!|\！|\.”|\?”\!”)\s"
 
     new_sentences = []
     for sent in sentences:
@@ -196,7 +201,7 @@ def split_text(
 
     # check to make sure there will be no utterances for segmentation with only OOV symbols
     vocab_no_space_with_digits = set(vocabulary + [i for i in range(10)])
-    vocab_no_space_with_digits.remove(' ')
+    # vocab_no_space_with_digits.remove(' ')
     sentences = [s for s in sentences if len(vocab_no_space_with_digits.intersection(set(s))) > 0]
 
     if min_length > 0:
@@ -214,7 +219,7 @@ def split_text(
 
     # save split text with original punctuation and case
     out_dir, out_file_name = os.path.split(out_file)
-    with open(os.path.join(out_dir, out_file_name[:-4] + '_with_punct.txt'), "w") as f:
+    with open(os.path.join(out_dir, out_file_name[:-4] + '_with_punct.txt'), "w", encoding='utf-8') as f:
         f.write("\n".join(sentences))
 
     sentences = '\n'.join(sentences)
@@ -282,7 +287,7 @@ def split_text(
     )
     sentences_norm = sentences.translate(''.maketrans(symbols_to_remove, len(symbols_to_remove) * ' '))
 
-    with open(os.path.join(out_dir, out_file_name[:-4] + '_with_punct_normalized.txt'), "w") as f:
+    with open(os.path.join(out_dir, out_file_name[:-4] + '_with_punct_normalized.txt'), "w", encoding='utf-8') as f:
         f.write(sentences_norm)
 
     if do_lower_case:
@@ -294,7 +299,7 @@ def split_text(
 
     # remove extra space
     sentences = re.sub(r' +', ' ', sentences)
-    with open(out_file, "w") as f:
+    with open(out_file, "w", encoding='utf-8') as f:
         f.write(sentences)
 
 
@@ -305,7 +310,8 @@ if __name__ == '__main__':
 
     text_files = []
     if args.in_text:
-        vocabulary = None
+        with open('F:\pythonProject\SpeechTextDatasetConstruct\data\zh_vocabulary.txt', 'r', encoding='utf-8') as fr:
+            vocabulary = [i for i in fr.read()]
 
         if os.path.isdir(args.in_text):
             text_files = Path(args.in_text).glob(("*.txt"))
@@ -313,7 +319,7 @@ if __name__ == '__main__':
             text_files.append(Path(args.in_text))
         for text in text_files:
             base_name = os.path.basename(text)[:-4]
-            out_text_file = os.path.join(args.output_dir, base_name + '.txt')
+            out_text_file = os.path.join(args.output_dir, base_name + '_output.txt')
 
             split_text(
                 text,
@@ -323,7 +329,6 @@ if __name__ == '__main__':
                 min_length=args.min_length,
                 max_length=args.max_length,
                 additional_split_symbols=args.additional_split_symbols,
-                use_nemo_normalization=args.use_nemo_normalization,
             )
         print(f'Processed text saved at {args.output_dir}')
 
