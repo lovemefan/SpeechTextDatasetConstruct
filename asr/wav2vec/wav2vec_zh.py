@@ -7,7 +7,7 @@
 import re
 
 import soundfile
-import torch, transformers, ctc_segmentation
+import torch
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
 LANG_ID = "zh-CN"
@@ -26,13 +26,15 @@ def recognized(wav_path):
     """
 
     speech_array, sampling_rate = soundfile.read(wav_path)
+
     assert sampling_rate == 16000
 
     features = processor(speech_array, sampling_rate=16000, return_tensors="pt")
     input_values = features.input_values
+    attention_mask = features.attention_mask
 
     with torch.no_grad():
-        logits = model(input_values).logits
+        logits = model(input_values, attention_mask=attention_mask).logits
 
     predicted_ids = torch.argmax(logits, dim=-1)
     transcription = processor.batch_decode(predicted_ids)[0]
@@ -43,9 +45,10 @@ def recognized(wav_path):
         softmax = torch.nn.LogSoftmax(dim=-1)
         lpz = softmax(logits)[0].cpu().numpy()
 
-    return text, lpz
+    duration = speech_array.shape[0] / lpz.shape[0] / sampling_rate
+    return text[0], lpz, duration
 
 
 if __name__ == '__main__':
-    text, _ = recognized('F:\pythonProject\SpeechTextDatasetConstruct\data\《摸金天师》第001章_百辟刀.wav')
+    text, _ = recognized('F:\pythonProject\SpeechTextDatasetConstruct\data\ylylbs-001.wav_3.250-6.800.wav')
     print(text)
