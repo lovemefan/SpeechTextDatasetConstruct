@@ -4,9 +4,7 @@
 # @Email : lovemefan@outlook.com
 # @File : ctc_segmentation_zh.py
 import json
-
 import ctc_segmentation
-
 import soundfile
 import torch
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
@@ -20,6 +18,7 @@ model = Wav2Vec2ForCTC.from_pretrained(MODEL_ID)
 model.to(DEVICE)
 
 vocab_dict = []
+
 
 def segmenetation(wav_file):
     speech_array, sampling_rate = soundfile.read(wav_file)
@@ -52,7 +51,8 @@ def segmenetation(wav_file):
     # char_list = [x.lower() for x in vocab_dict.keys()]
     config = ctc_segmentation.CtcSegmentationParameters(char_list=char_list)
     config.index_duration = index_duration
-    config.min_window_size = 8000
+    config.min_window_size = 800
+    # config.score_min_mean_over_L = 10
     # CTC segmentation
     ground_truth_mat, utt_begin_indices = ctc_segmentation.prepare_text(config, text)
     timings, char_probs, state_list = ctc_segmentation.ctc_segmentation(config, lpz, ground_truth_mat)
@@ -63,4 +63,4 @@ def segmenetation(wav_file):
 
 
 if __name__ == '__main__':
-    segmenetation('F:\pythonProject\SpeechTextDatasetConstruct\data\（评“新”而论）娃娃用品，良心检测.wav')
+    segmenetation('F:\pythonProject\SpeechTextDatasetConstruct\data\ylylbs-001.wav_3.250-6.800.wav')
