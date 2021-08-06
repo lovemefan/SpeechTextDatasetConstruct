@@ -35,7 +35,12 @@ def segmenetation(wav_file):
     predicted_ids = torch.argmax(logits, dim=-1)
     transcription = processor.batch_decode(predicted_ids)[0]
     # Split the transcription into words and handle as separate utterances
-    text = transcription.split()
+
+    transcript_file = wav_file.replace(".wav", "_output.txt")
+    with open(transcript_file, "r", encoding='utf-8') as f:
+        text = f.readlines()
+        text = [t.strip() for t in text if t.strip()]
+
     # CTC log posteriors inference
     with torch.no_grad():
         softmax = torch.nn.LogSoftmax(dim=-1)
@@ -51,7 +56,7 @@ def segmenetation(wav_file):
     # char_list = [x.lower() for x in vocab_dict.keys()]
     config = ctc_segmentation.CtcSegmentationParameters(char_list=char_list)
     config.index_duration = index_duration
-    config.min_window_size = 800
+    config.min_window_size = 6400
     # config.score_min_mean_over_L = 10
     # CTC segmentation
     ground_truth_mat, utt_begin_indices = ctc_segmentation.prepare_text(config, text)
@@ -63,4 +68,4 @@ def segmenetation(wav_file):
 
 
 if __name__ == '__main__':
-    segmenetation('F:\pythonProject\SpeechTextDatasetConstruct\data\ylylbs-001.wav_3.250-6.800.wav')
+    segmenetation('F:\pythonProject\SpeechTextDatasetConstruct\data\学习强国.wav')
