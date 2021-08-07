@@ -164,7 +164,7 @@ def split_text(
     sentences = [s.strip() for s in sentences if s.strip()]
 
     # Read and split transcript by utterance (roughly, sentences)
-    split_pattern = f"(?<!\w\.\w.)(?<![A-Z{vi_unicode}][A-Z{zh_unicode}][a-z{vi_unicode}][a-z{zh_unicode}]\.)(?<![A-Z{zh_unicode}]\.)(?<=\.|\。|\?|\？|\!|\！|\.”|\?”\!”)\s"
+    split_pattern = f"(?<!\w\.\w.)(?<![A-Z{vi_unicode}][A-Z{zh_unicode}][a-z{vi_unicode}][a-z{zh_unicode}]\.)(?<=\.|\。|\?|\？|\!|\！|\.”|\?”\!”)"
 
     new_sentences = []
     for sent in sentences:

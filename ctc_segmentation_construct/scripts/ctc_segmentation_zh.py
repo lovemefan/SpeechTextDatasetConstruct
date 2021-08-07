@@ -4,7 +4,7 @@
 # @Email : lovemefan@outlook.com
 # @File : ctc_segmentation_zh.py
 import json
-import ctc_segmentation
+import run_ctc_segmentation
 import soundfile
 import torch
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
@@ -49,19 +49,19 @@ def segmenetation(wav_file):
     index_duration = speech_array.shape[0] / lpz.shape[0] / sampling_rate
 
     # CTC segmentation preparation
-    with open('F:\pythonProject\SpeechTextDatasetConstruct\\asr\wav2vec\\vocab.json', 'r', encoding='utf-8') as fr:
+    with open('/asr/wav2vec/zh/vocab.json', 'r', encoding='utf-8') as fr:
         content = fr.read()
         char_list = [key for key, value in json.loads(content).items()]
 
     # char_list = [x.lower() for x in vocab_dict.keys()]
-    config = ctc_segmentation.CtcSegmentationParameters(char_list=char_list)
+    config = run_ctc_segmentation.CtcSegmentationParameters(char_list=char_list)
     config.index_duration = index_duration
     config.min_window_size = 6400
     # config.score_min_mean_over_L = 10
     # CTC segmentation
-    ground_truth_mat, utt_begin_indices = ctc_segmentation.prepare_text(config, text)
-    timings, char_probs, state_list = ctc_segmentation.ctc_segmentation(config, lpz, ground_truth_mat)
-    segments = ctc_segmentation.determine_utterance_segments(config, utt_begin_indices, char_probs, timings, text)
+    ground_truth_mat, utt_begin_indices = run_ctc_segmentation.prepare_text(config, text)
+    timings, char_probs, state_list = run_ctc_segmentation.ctc_segmentation(config, lpz, ground_truth_mat)
+    segments = run_ctc_segmentation.determine_utterance_segments(config, utt_begin_indices, char_probs, timings, text)
     # print segments
     for word, segment in zip(text, segments):
         print(f"{segment[0]:.2f} {segment[1]:.2f} {segment[2]:3.4f} {word}")
