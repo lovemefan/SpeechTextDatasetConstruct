@@ -12,7 +12,7 @@ import os
 from pathlib import PosixPath
 from typing import List, Tuple, Union
 
-import ctc_segmentation as cs
+import run_ctc_segmentation as cs
 import numpy as np
 
 
