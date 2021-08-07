@@ -50,7 +50,7 @@ def get_segments(
         text = [t.strip() for t in text if t.strip()]
 
     # add corresponding original text without pre-processing
-    transcript_file_no_preprocessing = transcript_file.replace('.txt', '_with_punct.txt')
+    transcript_file_no_preprocessing = transcript_file.replace('.txt', '_output_with_punct.txt')
     if not os.path.exists(transcript_file_no_preprocessing):
         raise ValueError(f'{transcript_file_no_preprocessing} not found.')
 
@@ -59,7 +59,7 @@ def get_segments(
         text_no_preprocessing = [t.strip() for t in text_no_preprocessing if t.strip()]
 
     # add corresponding normalized original text
-    transcript_file_normalized = transcript_file.replace('.txt', '_with_punct_normalized.txt')
+    transcript_file_normalized = transcript_file.replace('.txt', 'output_with_punct_normalized.txt')
     if not os.path.exists(transcript_file_normalized):
         raise ValueError(f'{transcript_file_normalized} not found.')
 
@@ -82,6 +82,11 @@ def get_segments(
 
     timings, char_probs, char_list = cs.ctc_segmentation(config, log_probs, ground_truth_mat)
     segments = cs.determine_utterance_segments(config, utt_begin_indices, char_probs, timings, text)
+
+    # print segments
+    for word, segment in zip(text, segments):
+        print(f"{segment[0]:.2f} {segment[1]:.2f} {segment[2]:3.4f} {word}")
+
     write_output(output_file, path_wav, segments, text, text_no_preprocessing, text_normalized)
 
 
