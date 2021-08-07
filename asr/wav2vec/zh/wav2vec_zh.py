@@ -50,5 +50,5 @@ def recognized(wav_path):
 
 
 if __name__ == '__main__':
-    text, _ = recognized('F:\pythonProject\SpeechTextDatasetConstruct\data\ylylbs-001.wav_3.250-6.800.wav')
+    text, _ = recognized('/data/ylylbs-001.wav_3.250-6.800.wav')
     print(text)
