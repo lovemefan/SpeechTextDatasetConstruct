@@ -16,7 +16,7 @@ import soundfile
 
 from asr.wav2vec.vi.wav2vec_vi import ViASR
 from asr.wav2vec.zh.wav2vec_zh import ZhASR
-from ctc_segmentation.scripts.utils import get_segments, listener_configurer, listener_process, worker_configurer, worker_process
+from ctc_segmentation_construct.scripts.utils import *
 
 parser = argparse.ArgumentParser(description="CTC Segmentation")
 parser.add_argument("--output_dir", default='output', type=str, help='Path to output directory')
@@ -28,7 +28,7 @@ parser.add_argument(
     'different or path to wav file (transcript should have the same base name and be located in the same folder'
     'as the wav file.',
 )
-parser.add_argument('--vocab', type=str,  help='vocab.json file')
+parser.add_argument('--vocab', type=str, required=True, help='vocab.json file')
 parser.add_argument('--window_len', type=int, default=8000, help='Window size for ctc segmentation algorithm')
 parser.add_argument('--no_parallel', action='store_true', help='Flag to disable parallel segmentation')
 parser.add_argument('--sample_rate', type=int, default=16000, help='Sampling rate')
@@ -87,9 +87,9 @@ if __name__ == '__main__':
             segments_dir, f"{args.window_len}_" + path_audio.name.replace(".wav", "_output_segments.txt")
         )
         try:
-            sample_rate, signal = soundfile.read(path_audio)
+            signal, sample_rate = soundfile.read(path_audio)
 
-            if sample_rate != args.sample_rate:
+            if sample_rate != int(args.sample_rate):
                 raise ValueError(
                     f'Sampling rate of the audio file {path_audio} doesn\'t match --sample_rate={args.sample_rate}'
                 )
@@ -100,8 +100,8 @@ if __name__ == '__main__':
             )
             raise
 
-        transcription, log_probs, duration =  asr_model.recognized(path_audio)
-        logging.debug(f'Duration: {duration}s, file_name: {path_audio}')
+        transcription, log_probs, duration = asr_model.recognized(path_audio)
+        logging.info(f'Duration: {duration}s, file_name: {path_audio}')
 
         all_log_probs.append(log_probs)
         all_segment_file.append(str(segment_file))
@@ -127,7 +127,6 @@ if __name__ == '__main__':
         raise ValueError(
             f'vocab.json file {args.vocab} is not a json file.'
         )
-
 
     if len(all_log_probs) == 0:
         raise ValueError(f'No valid audio files found at {args.data}')
