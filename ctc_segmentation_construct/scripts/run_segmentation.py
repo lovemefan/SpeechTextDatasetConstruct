@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# coding=utf-8
 # @Time  : 2021/8/7 12:56
 # @Author : lovemefan
 # @Email : lovemefan@outlook.com
@@ -30,10 +30,10 @@ parser.add_argument(
 )
 parser.add_argument('--vocab', type=str, required=True, help='vocab.json file')
 parser.add_argument('--window_len', type=int, default=8000, help='Window size for ctc segmentation algorithm')
-parser.add_argument('--no_parallel', action='store_true', help='Flag to disable parallel segmentation')
+parser.add_argument('--no_parallel', action='store_false', help='Flag to disable parallel segmentation')
 parser.add_argument('--sample_rate', type=int, default=16000, help='Sampling rate')
 parser.add_argument(
-    '--language', type=str, default='zh', help='language, zh , vi',
+    '--language', type=str, default='vi', help='language, zh , vi',
 )
 parser.add_argument('--debug', action='store_true', help='Flag to enable debugging messages')
 
@@ -116,7 +116,7 @@ if __name__ == '__main__':
                 f'vocab.json file {args.vocab} doesn\'t exist, please check the path of vocab.json '
             )
         # load vocabulary
-        with open('/asr/wav2vec/zh/vocab.json', 'r', encoding='utf-8') as fr:
+        with open(args.vocab, 'r', encoding='utf-8') as fr:
             content = fr.read()
             vocabulary = [key for key, value in json.loads(content).items()]
 
