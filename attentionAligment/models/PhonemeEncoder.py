@@ -99,6 +99,7 @@ class BertForMaskedPhoneLM(BertForMaskedLM):
                             config.hidden_size,
                             config.hidden_size,
                             config.hidden_dropout_prob)
+        self.out_linear = nn.Linear(config.hidden_size, config.vocab_size)
         if config.withGAU:
             self.bert.encoder = BertEncoderWithGAU(config)
 
@@ -135,7 +136,7 @@ class BertForMaskedPhoneLM(BertForMaskedLM):
         )
 
         prediction_scores = self.cnn(outputs.hidden_states[-1])
-
+        # prediction_scores = self.out_linear(prediction_scores)
         masked_lm_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()  # -100 index = padding token
