@@ -137,7 +137,8 @@ class MixedChunkAttention(nn.Module):
             self,
             x,
             *,
-            mask=None
+            mask=None,
+            residual=True
     ):
         """
         b - batch
@@ -242,6 +243,9 @@ class MixedChunkAttention(nn.Module):
 
         out = gate * (quad_attn_out + lin_attn_out)
 
+        out = self.to_out(out)
         # projection out and residual
+        if residual:
+            out = out + x
 
-        return self.to_out(out) + x
+        return out, attn
