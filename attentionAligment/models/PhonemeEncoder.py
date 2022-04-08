@@ -136,7 +136,7 @@ class BertForMaskedPhoneLM(BertForMaskedLM):
         )
 
         prediction_scores = self.cnn(outputs.hidden_states[-1])
-        # prediction_scores = self.out_linear(prediction_scores)
+        prediction_scores = self.out_linear(prediction_scores)
         masked_lm_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()  # -100 index = padding token
