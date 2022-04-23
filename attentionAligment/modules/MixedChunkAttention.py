@@ -175,7 +175,8 @@ class MixedChunkAttention(nn.Module):
         # mask out linear attention keys
 
         if mask:
-            lin_k = lin_k.masked_fill(~mask, 0.)
+            lin_mask = rearrange(mask, '... -> ... 1')
+            lin_k = lin_k.masked_fill(~lin_mask, 0.)
 
         # rotate queries and keys
 
