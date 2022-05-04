@@ -3,6 +3,10 @@
 # @Author : lovemefan
 # @Email : lovemefan@outlook.com
 # @File : attention_alignment_modeling.py
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from attentionAligment.models.AttentionAlignment import CrossAttention
 import re
 import argparse
 from pathlib import Path
@@ -11,22 +15,21 @@ import librosa
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import CrossEntropyLoss
 from itertools import chain, groupby
 import json
 
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union, Tuple
-from g2p_en import G2p
+
 from datasets import load_dataset, load_metric, load_from_disk
 from transformers import Wav2Vec2CTCTokenizer
 from transformers import Wav2Vec2FeatureExtractor
 from transformers import Trainer, TrainingArguments
 from transformers import Wav2Vec2Processor
 from transformers import Wav2Vec2Config, Wav2Vec2ForPreTraining
-from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices, Wav2Vec2ForPreTrainingOutput, \
-    Wav2Vec2ForCTC
+from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices,  \
+    Wav2Vec2ForCTC, Wav2Vec2GumbelVectorQuantizer
 from transformers.modeling_outputs import CausalLMOutput, MaskedLMOutput
 from transformers import BertForMaskedLM, BertConfig
 
@@ -117,30 +120,38 @@ class ConvBank(nn.Module):
         self.out_linear = nn.Linear(latest_size, output_class_num)
 
     def forward(self, features):
-        hidden = F.dropout(F.relu(self.in_linear(features)), p=self.drop_p)
+        hidden = F.dropout(F.relu(self.in_linear(features), inplace=False), p=self.drop_p)
 
         conv_feats = []
         hidden = hidden.transpose(1, 2).contiguous()
         for cnn in self.cnns:
             conv_feats.append(cnn(hidden))
         hidden = torch.cat(conv_feats, dim=1).transpose(1, 2).contiguous()
-        hidden = F.dropout(F.relu(hidden), p=self.drop_p)
+        hidden = F.dropout(F.relu(hidden, inplace=False), p=self.drop_p)
 
         predicted = self.out_linear(hidden)
         return predicted
 
 
 class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
-
     def __init__(self, config):
         super().__init__(config)
         self.bert = BertForMaskedPhoneLM(config.bert_config)
         self.cnn = ConvBank(config.hidden_size, 384, [1], 384, 384, 0.1)
+        # self.quantizer = Wav2Vec2GumbelVectorQuantizer(config)
         # self.lm_head = nn.Linear(config.hidden_size,config.vocab_size)
-        #        self.project_hid = nn.Linear(config.hidden_size, config.proj_codevector_dim)
+        # self.project_hid = nn.Linear(512, config.proj_codevector_dim)
         # self.phone_rnn = RNN(384, config.vocab_size)
 
-        self.attention = MixedChunkAttention(384)
+        # make sure that project_hid & project_q are initialized like normal linear layers
+        self.project_q = nn.Linear(config.codevector_dim, config.proj_codevector_dim)
+        self.project_hid = nn.Linear(512, config.proj_codevector_dim)
+        self.dropout = nn.Dropout(config.final_dropout)
+        self.lm_head = nn.Linear(384, config.vocab_size)
+        if config.mix_attention:
+            self.attention = MixedChunkAttention(dim=384)
+        else:
+            self.attention = CrossAttention(384)
         self.align_loss = ForwardSumLoss()
 
     def freeze_wav2vec2(self):
@@ -150,6 +161,29 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
     def initialize_phone_model(self, path):
 
         self.bert = BertForMaskedPhoneLM.from_pretrained(path)
+        self.config.bert_config = None
+        # self.bert.freeze_feature_extractor()
+
+    def initialize_wav2vec2_model(self, path):
+        weights = Wav2Vec2ForCTC.from_pretrained(path).state_dict()
+        del weights['lm_head.weight']
+        del weights['lm_head.bias']
+        state_dict = self.state_dict()
+        weights = {k: v for k, v in weights.items() if k in state_dict.keys()}
+        state_dict.update(weights)
+
+        self.load_state_dict(state_dict)
+        if SAMPLING_RATE != 32000:
+            self.wav2vec2.feature_extractor.conv_layers[6].conv.stride = (1,)
+            self.config.conv_stride[-1] = 1
+        self.freeze_feature_extractor()
+
+
+        self.config.num_negatives = 50
+        for param in self.quantizer.parameters():
+            param.requires_grad = False
+        for param in self.project_q.parameters():
+            param.requires_grad = False
 
     def _get_feature_vector_attention_mask(self, feature_vector_length: int, attention_mask: torch.LongTensor):
         output_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1)).to(torch.long)
@@ -162,6 +196,55 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
         attention_mask[(torch.arange(attention_mask.shape[0], device=attention_mask.device), output_lengths - 1)] = 1
         attention_mask = attention_mask.flip([-1]).cumsum(-1).flip([-1]).bool()
         return attention_mask
+
+    @staticmethod
+    def _sample_negatives(
+            features: torch.FloatTensor, num_negatives: int, attention_mask: Optional[torch.LongTensor] = None
+    ):
+        """
+        Sample `num_negatives` vectors from feature vectors.
+        """
+        batch_size, sequence_length, hidden_size = features.shape
+        if sequence_length <= 1:
+            raise ValueError(
+                f"`features should have `sequence_length` > 1, but are of shape (batch_size, sequence_length, hidden_size) = ({batch_size, sequence_length, hidden_size})."
+            )
+
+        features = features.view(-1, hidden_size)  # BTC => (BxT)C
+
+        with torch.no_grad():
+            # get `num_negatives` random vector indices from the same utterance
+            sampled_negative_indices = []
+            for batch_idx in range(batch_size):
+                high = attention_mask[batch_idx].sum() - 1 if attention_mask is not None else sequence_length - 1
+                sampled_indices_slice = torch.randint(
+                    0, high, size=(num_negatives * sequence_length,), device=features.device
+                )
+                sampled_negative_indices.append(sampled_indices_slice)
+
+            sampled_negative_indices = torch.stack(sampled_negative_indices)
+
+            # generate indices of the positive vectors themselves, repeat them `num_negatives` times
+            feature_indices = (
+                torch.arange(sequence_length, device=features.device)[:, None]
+                    .expand(sequence_length, num_negatives)
+                    .flatten()
+            )
+
+            # avoid sampling the same positive vector, but keep the distribution uniform
+            sampled_negative_indices[sampled_negative_indices >= feature_indices] += 1
+
+        # correct for batch size
+        for batch_idx in range(1, batch_size):
+            sampled_negative_indices[batch_idx] += batch_idx * sequence_length
+
+        # take negative vectors from sampled indices
+        sampled_negatives = features[sampled_negative_indices.view(-1)]
+        sampled_negatives = sampled_negatives.view(batch_size, sequence_length, num_negatives, hidden_size).permute(
+            2, 0, 1, 3
+        )
+
+        return sampled_negatives
 
     def forward(
             self,
@@ -195,7 +278,8 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
         phone_hidden = self.bert(input_ids=labels, attention_mask=labels_attention_mask).hidden_states[-1]
 
         # compute cross attention
-        att_out, energy = self.attention(frame_hidden, phone_hidden, labels_attention_mask)
+
+        att_out, energy = self.attention(frame_hidden, phone_hidden, frame_hidden, mask=labels_attention_mask)
 
         # start masked modeling
         # 0. remove the blank symbol
@@ -212,11 +296,27 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
             # compute reduced attention_mask correponding to feature vectors
             attention_mask = self._get_feature_vector_attention_mask(extract_features.shape[1], attention_mask)
 
-        #        loss_fct = nn.CrossEntropyLoss()
 
-        #        phone_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
-
+        # 3. compute CTC loss
+        hidden_states = self.dropout(frame_hidden)
+        logits = self.lm_head(hidden_states)
+        # ctc_loss doesn't support fp16
+        log_probs = nn.functional.log_softmax(logits, dim=-1, dtype=torch.float32).transpose(0, 1)
+        input_lengths = torch.ones(log_probs.size()[1]).long()*log_probs.size()[0]
+        target_lengths = torch.sum(torch.ones_like(labels), dim=-1).long()
+        with torch.backends.cudnn.flags(enabled=False):
+            ctc_loss = nn.functional.ctc_loss(
+                log_probs,
+                labels.view(-1),
+                input_lengths,
+                target_lengths,
+                blank=self.config.pad_token_id,
+                reduction=self.config.ctc_loss_reduction,
+                zero_infinity=self.config.ctc_zero_infinity,
+            )
         loss = None
+        # try for oov
+        torch.cuda.empty_cache()
         if self.training:
             # for training, we sample negatives
             # 3. sample K negatives (distractors) quantized states for contrastive loss
@@ -247,8 +347,8 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
             contrastive_loss = nn.functional.cross_entropy(preds.float(), target, reduction="mean")
 
             # 7. compute diversity loss: \mathbf{L}_d
-            # num_codevectors = self.config.num_codevectors_per_group * self.config.num_codevector_groups
-            # diversity_loss = (num_codevectors - codevector_perplexity) / num_codevectors
+            num_codevectors = self.config.num_codevectors_per_group * self.config.num_codevector_groups
+            diversity_loss = (num_codevectors - codevector_perplexity) / num_codevectors
 
             # 8. \mathbf{L} = \mathbf{L}_m + \alpha * \mathbf{L}_d
             expanded_labels_attention_mask = (1 - labels_attention_mask) * -10000.0
@@ -265,20 +365,15 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
             #            inter_phone = F.cosine_similarity(phone_emb[:,:-1,:],phone_emb[:,1:,:],dim=-1)*labels_attention_mask[:,1:]
             #            interphone_loss = torch.sum(inter_phone)/torch.sum(labels_attention_mask[:,1:])
 
-            loss = contrastive_loss + WEIGHT * align_loss  # + interphone_loss
-
+            loss = contrastive_loss + WEIGHT * align_loss + ctc_loss # + interphone_loss
+            # loss = align_loss + ctc_loss # + interphone_loss
+        # try for oov
+        torch.cuda.empty_cache()
         return CausalLMOutput(
             loss=loss, logits=transformer_features, hidden_states=outputs.hidden_states, attentions=energy
         )
 
 
-def get_phones(sen):
-    '''
-    convert texts to phone sequence
-    '''
-    sen = g2p(sen)
-    sen = [re.sub(r'\d', '', p) for p in sen]
-    return sen
 
 
 def get_phone_ids(phones):
@@ -289,9 +384,9 @@ def get_phone_ids(phones):
     punctuation = set('.,!?')
     for p in phones:
         if re.match(r'^\w+?$', p):
-            ids.append(mapping_phone2id.get(p, mapping_phone2id['[UNK]']))
+            ids.append(mapping_phone2id.get(p, mapping_phone2id['<unk>']))
         elif p in punctuation:
-            ids.append(mapping_phone2id.get('[SIL]'))
+            ids.append(mapping_phone2id.get('<sil>'))
     ids = [0] + ids
     if ids[-1] != 0:
         ids.append(0)
@@ -316,13 +411,15 @@ def seq2duration(phones, resolution=0.02):
     return out
 
 
-def prepare_common_voice_dataset(batch):
+def prepare_dataset(batch):
     # check that all files have the correct sampling rate
-
-    batch["input_values"] = re.search(r'(.*?)\.mp3', batch['path']).group(1) + '.wav'
-    # batch["input_values"] = batch['path']
-    # batch['labels'] = batch['sentence']
-    batch['labels'] = "Lorem ipsum dolor sit amet, consectetur adipisicing elit"
+    phonemes = []
+    batch['input_values'] = batch['path']
+    del batch['path']
+    for char in batch['phoneme']:
+        if char != ' ' and char != '|':
+            phonemes.append(char)
+    batch['labels'] = phonemes
     return batch
 
 
@@ -341,7 +438,7 @@ class SpeechCollatorWithPadding:
         # different padding methods
 
         # get phone features
-        label_features = [{"input_ids": get_phone_ids(get_phones(feature["labels"]))} for feature in features]
+        label_features = [{"input_ids": get_phone_ids(feature["labels"])} for feature in features]
         text_len = [len(i['input_ids']) for i in label_features]
 
         with self.processor.as_target_processor():
@@ -375,7 +472,8 @@ class SpeechCollatorWithPadding:
         batch["text_len"] = torch.tensor(text_len)
         batch['labels'] = labels_batch["input_ids"]  # .masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch['labels_attention_mask'] = labels_batch['attention_mask']
-
+        # try for oov
+        torch.cuda.empty_cache()
         return batch
 
 
@@ -383,84 +481,85 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--train_data', type=str,
-                        default='/gpfs/accounts/lingjzhu_root/lingjzhu1/lingjzhu/asr/common_voice_filtered')
-    parser.add_argument('--val_data', default=None, type=str)
+                        default='/root/dataset/speechDataset/Vietnamese/mainfest_for_attention_alignment/train.tsv')
+    # parser.add_argument('--wav2vec2', type=str, default="/root/data/dataset/wav2vec_of_vi_for_transformers")
+    parser.add_argument('--wav2vec2', type=str, default="facebook/wav2vec2-large-xlsr-53")
+    parser.add_argument('--bert', type=str, default="/root/data/dataset/text/vietnamese/bert-phones/checkpoint-13000")
+    parser.add_argument('--out_dir', type=str, default="./checkpoint/wav2vec2-attention-align")
+    parser.add_argument('--restore_from_checkpoint', type=str, default=None)
+
+
+    # parser.add_argument('--train_data', type=str,
+    #                     default='/userdata/zlf/SpeechTextDatasetConstruct/mainfest_for_attention_alignment/train.tsv')
+    # # parser.add_argument('--wav2vec2', type=str, default="/userdata/zlf/pretrain-models/transformers/vi-phoneme")
+    # parser.add_argument('--wav2vec2', type=str, default="facebook/wav2vec2-large-xlsr-53")
+    # parser.add_argument('--bert', type=str, default="/userdata/zlf/pretrain-models/transformers/bert-phones/checkpoint-13000")
+    # parser.add_argument('--out_dir', type=str, default="./models/wav2vec2-attention-align")
+    #
+    parser.add_argument('--val_data', default="/root/dataset/speechDataset/Vietnamese/mainfest_for_attention_alignment/dev.tsv", type=str)
     parser.add_argument('--test_data', default=None, type=str)
-    parser.add_argument('--out_dir', type=str, default="./models/wav2vec2-base-cv-attention-align-10ms-1.0")
     parser.add_argument('--weight', type=float, default=1.0)
     parser.add_argument('--sampling_rate', type=float, default=16000)
 
     args = parser.parse_args()
 
+    '''
+        Load dataset
+        '''
+    corpus = load_dataset("csv", delimiter='\t', data_files=[args.train_data])
+    val_corpus = load_dataset("csv",  delimiter='\t', data_files=[args.val_data])
+    corpus = corpus.map(prepare_dataset)
+    val_corpus = val_corpus.map(prepare_dataset)
+
+
+
+
     WEIGHT = args.weight
     SAMPLING_RATE = args.sampling_rate
 
-    g2p = G2p()
-    mapping_phone2id = json.load(open("vocab-ctc.json", 'r'))
+
+    mapping_phone2id = json.load(open("vocab.json", 'r'))
     mapping_id2phone = {v: k for k, v in mapping_phone2id.items()}
 
-    tokenizer = Wav2Vec2CTCTokenizer("vocab-ctc.json", unk_token="[UNK]", pad_token="[PAD]", word_delimiter_token="")
+    tokenizer = Wav2Vec2CTCTokenizer("vocab.json", unk_token="<unk>", pad_token="<pad>", word_delimiter_token="")
     feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, padding_value=0.0,
                                                  do_normalize=True, return_attention_mask=False)
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
+    data_collator = SpeechCollatorWithPadding(processor=processor)
 
-    config = Wav2Vec2Config.from_pretrained('facebook/wav2vec2-base')
-    bert_config = BertConfig.from_pretrained(Path('/userdata/zlf/charsiu/bert-phoneme'))
+    config = Wav2Vec2Config.from_pretrained(args.wav2vec2)
+    bert_config = BertConfig.from_pretrained(Path(args.bert))
     config.bert_config = bert_config
     config.pad_token_id = tokenizer.pad_token_id
     config.vocab_size = len(tokenizer)
+    config.mix_attention = True
     config.ctc_loss_reduction = 'mean'
     model = Wav2Vec2ForAttentionAlignment(config)
-    # model.freeze_feature_extractor()
-    #    model.initialize_phone_model('../bert-phone')
-
-    weights = Wav2Vec2ForCTC.from_pretrained('facebook/wav2vec2-base').state_dict()
-    del weights['lm_head.bias']
-    del weights['lm_head.weight']
-    #     weights = torch.load('./models/neural_attention_aligner_forwardsum_10ms_true_quantizer.pt').state_dict()
-    #     weights = model.from_pretrained("charsiu/en_w2v2_fs_10ms").state_dict()
-    state_dict = model.state_dict()
-    #    weights = {k:v for k,v in weights.items() if k in state_dict.keys()}
-    state_dict.update(weights)
-
-    model.load_state_dict(state_dict)
-    if SAMPLING_RATE != 32000:
-        model.wav2vec2.feature_extractor.conv_layers[6].conv.stride = (1,)
-        model.config.conv_stride[-1] = 1
     model.freeze_feature_extractor()
-    # model.bert.freeze_feature_extractor()
-    model.config.bert_config = None
+    if not args.restore_from_checkpoint:
+        model.initialize_phone_model(args.bert)
+        model.initialize_wav2vec2_model(args.wav2vec2)
+    else:
+        # avoid TypeError: Object of type BertConfig is not JSON serializable
+        model.config.bert_config = None
+    total = sum([param.nelement() for param in model.parameters()])
 
-    model.config.num_negatives = 50
-    for param in model.quantizer.parameters():
-        param.requires_grad = False
-    for param in model.project_q.parameters():
-        param.requires_grad = False
-
-    '''
-    Load dataset
-    '''
-    # common_voice = load_from_disk('/dataset/speech/common_voice/cv-corpus-6.1-2020-12-11/en')
-    common_voice = load_dataset('common_voice', 'as')
-    common_voice = common_voice.map(prepare_common_voice_dataset)
-    print(len(common_voice))
-    print(common_voice['train'][0])
-
-    data_collator = SpeechCollatorWithPadding(processor=processor)
+    print(model)
+    print("Number of model parameter: %.2fM" % (total / 1e6))
 
     # training settings
     training_args = TrainingArguments(
         output_dir=args.out_dir,
         group_by_length=True,
-        per_device_train_batch_size=4,
+        per_device_train_batch_size=2,
         gradient_accumulation_steps=16,
         #                                      evaluation_strategy="steps",
-        num_train_epochs=1,
-        fp16=False,
+        num_train_epochs=20,
+        fp16=True,
         save_steps=500,
         #                                      eval_steps=1000,
         logging_steps=500,
-        learning_rate=3e-4,
+        learning_rate=3e-5,
         weight_decay=0.0001,
         warmup_steps=500,
         save_total_limit=2,
@@ -471,10 +570,12 @@ if __name__ == "__main__":
         model=model,
         data_collator=data_collator,
         args=training_args,
-        #                            compute_metrics=compute_metrics,
-        train_dataset=common_voice['train'],
-        #                            eval_dataset=libris_train_prepared,
+        # compute_metrics=compute_metrics,
+        train_dataset=corpus['train'],
+        eval_dataset=val_corpus['train'],
         tokenizer=processor.feature_extractor,
     )
-
-    trainer.train()
+    if args.restore_from_checkpoint:
+        trainer.train(args.restore_from_checkpoint)
+    else:
+        trainer.train()
