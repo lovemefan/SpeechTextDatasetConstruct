@@ -162,7 +162,7 @@ class MixedChunkAttention(nn.Module):
         """
 
         b, device, g = v.shape[0], v.device, self.group_size
-        sn, tn = q.shape[-2], v.shape[-2]
+        sn, tn = q.shape[-2], k.shape[-2]
         # prenorm
 
         normed_x = self.norm(v)
@@ -183,7 +183,6 @@ class MixedChunkAttention(nn.Module):
         # offset and scale
         quad_q, lin_q = self.q_offset_scale(q)
         quad_k, lin_k = self.k_offset_scale(k)
-
         # mask out linear attention keys
 
         if mask is not None:
@@ -252,15 +251,21 @@ class MixedChunkAttention(nn.Module):
         quad_attn_out, lin_attn_out = map(lambda t: rearrange(t, 'b g n d -> b (g n) d')[:, :q.shape[1]],
                                           (quad_out, lin_out))
 
+
         # gate
 
         out = gate * (quad_attn_out + lin_attn_out)
 
-        out = self.to_out(out)
         # projection out and residual
         if residual:
-            out = out + v
-
+            out = out + rearrange(v, 'b g n j -> b (g n) j')[:, :sn, :]
+        del v, quad_q, quad_k, lin_q, lin_k, quad_out, lin_out, sim, gate, lin_kv
+        out = self.to_out(out)
         quad_attn = rearrange(attn, 'b g n j -> b (g n) j')[:, :sn, :tn]
-
+        # batch size, speech length, text length. batch size, text length, dim -> batch size, speech length, dim
+        phoneme_out = einsum('b s t, b t d -> b s d', quad_attn, k)
+        del q, k
+        out = torch.cat([phoneme_out, out], dim=-1)
         return out, quad_attn
+
+
