@@ -6,10 +6,10 @@
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from attentionAligment.models.AttentionAlignment import CrossAttention
 import re
 import argparse
-from pathlib import Path
 import soundfile as sf
 import librosa
 import torch
@@ -271,7 +271,7 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
 
         # acoustic embeddings
         frame_hidden = outputs[0]
-        #        frame_hidden = self.dropout(frame_hidden)
+        # frame_hidden = self.dropout(frame_hidden)
         frame_hidden = self.cnn(frame_hidden)
 
         # phone embeddings
@@ -317,56 +317,56 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
         loss = None
         # try for oov
         torch.cuda.empty_cache()
-        if self.training:
-            # for training, we sample negatives
-            # 3. sample K negatives (distractors) quantized states for contrastive loss
+        # for training, we sample negatives
+        # 3. sample K negatives (distractors) quantized states for contrastive loss
 
-            negative_quantized_features = self._sample_negatives(
-                quantized_features, self.config.num_negatives
-            )
+        negative_quantized_features = self._sample_negatives(
+            quantized_features, self.config.num_negatives
+        )
 
-            # 4. compute logits, corresponding to `logs = sim(c_t, [q_t, \sim{q}_t]) / \kappa`
-            # of equation (3) in https://arxiv.org/pdf/2006.11477.pdf
-            logits = self.compute_contrastive_logits(
-                quantized_features[None, :],
-                negative_quantized_features,
-                transformer_features,
-                self.config.contrastive_logits_temperature,
-            )
+        # 4. compute logits, corresponding to `logs = sim(c_t, [q_t, \sim{q}_t]) / \kappa`
+        # of equation (3) in https://arxiv.org/pdf/2006.11477.pdf
+        logits = self.compute_contrastive_logits(
+            quantized_features[None, :],
+            negative_quantized_features,
+            transformer_features,
+            self.config.contrastive_logits_temperature,
+        )
 
-            # 5. if a negative vector is identical to the positive (i.e. when codebook utilization is low),
-            # its cosine similarity will be masked
-            neg_is_pos = (quantized_features == negative_quantized_features).all(-1)
-            if neg_is_pos.any():
-                logits[1:][neg_is_pos] = float("-inf")
+        # 5. if a negative vector is identical to the positive (i.e. when codebook utilization is low),
+        # its cosine similarity will be masked
+        neg_is_pos = (quantized_features == negative_quantized_features).all(-1)
+        if neg_is_pos.any():
+            logits[1:][neg_is_pos] = float("-inf")
 
-            # 6. compute contrastive loss \mathbf{L}_m = cross_entropy(logs) =
-            # -log(exp(sim(c_t, q_t)/\kappa) / \sum_{\sim{q}} exp(sim(c_t, \sim{q})/\kappa))
-            preds = logits.transpose(0, 2).reshape(-1, logits.size(0))
-            target = ((1 - attention_mask.long()) * -100).transpose(0, 1).flatten()
-            contrastive_loss = nn.functional.cross_entropy(preds.float(), target, reduction="mean")
+        # 6. compute contrastive loss \mathbf{L}_m = cross_entropy(logs) =
+        # -log(exp(sim(c_t, q_t)/\kappa) / \sum_{\sim{q}} exp(sim(c_t, \sim{q})/\kappa))
+        preds = logits.transpose(0, 2).reshape(-1, logits.size(0))
+        target = ((1 - attention_mask.long()) * -100).transpose(0, 1).flatten()
+        contrastive_loss = nn.functional.cross_entropy(preds.float(), target, reduction="mean")
 
-            # 7. compute diversity loss: \mathbf{L}_d
-            num_codevectors = self.config.num_codevectors_per_group * self.config.num_codevector_groups
-            diversity_loss = (num_codevectors - codevector_perplexity) / num_codevectors
+        # 7. compute diversity loss: \mathbf{L}_d
+        num_codevectors = self.config.num_codevectors_per_group * self.config.num_codevector_groups
+        diversity_loss = (num_codevectors - codevector_perplexity) / num_codevectors
 
-            # 8. \mathbf{L} = \mathbf{L}_m + \alpha * \mathbf{L}_d
-            expanded_labels_attention_mask = (1 - labels_attention_mask) * -10000.0
-            expanded_labels_attention_mask = expanded_labels_attention_mask.unsqueeze(1).repeat(1, energy.size(1), 1)
-            att = torch.log_softmax(energy + expanded_labels_attention_mask, dim=-1)
-            align_loss = self.align_loss(att.unsqueeze(1), text_len, frame_len)
+        # 8. \mathbf{L} = \mathbf{L}_m + \alpha * \mathbf{L}_d
+        expanded_labels_attention_mask = (1 - labels_attention_mask) * -10000.0
+        expanded_labels_attention_mask = expanded_labels_attention_mask.unsqueeze(1).repeat(1, energy.size(1), 1)
+        att = torch.log_softmax(energy + expanded_labels_attention_mask, dim=-1)
+        align_loss = self.align_loss(att.unsqueeze(1), text_len, frame_len)
 
-            #            expanded_attention_mask = attention_mask.unsqueeze(2).repeat(1,1,energy.size(2)) * labels_attention_mask.unsqueeze(1).repeat(1,energy.size(1),1)
-            #            expanded_attention_mask = (1-expanded_attention_mask)*-10000.0
-            #            phone_attention = torch.softmax((energy+expanded_attention_mask).transpose(2,1),dim=-1)
-            #            phone_emb = torch.bmm(phone_attention,frame_hidden)
-            #            prediction_scores = self.phone_rnn(phone_emb,text_len)
-            #            labels = labels.masked_fill(labels_attention_mask.ne(1), -100)
-            #            inter_phone = F.cosine_similarity(phone_emb[:,:-1,:],phone_emb[:,1:,:],dim=-1)*labels_attention_mask[:,1:]
-            #            interphone_loss = torch.sum(inter_phone)/torch.sum(labels_attention_mask[:,1:])
+        #            expanded_attention_mask = attention_mask.unsqueeze(2).repeat(1,1,energy.size(2)) * labels_attention_mask.unsqueeze(1).repeat(1,energy.size(1),1)
+        #            expanded_attention_mask = (1-expanded_attention_mask)*-10000.0
+        #            phone_attention = torch.softmax((energy+expanded_attention_mask).transpose(2,1),dim=-1)
+        #            phone_emb = torch.bmm(phone_attention,frame_hidden)
+        #            prediction_scores = self.phone_rnn(phone_emb,text_len)
+        #            labels = labels.masked_fill(labels_attention_mask.ne(1), -100)
+        #            inter_phone = F.cosine_similarity(phone_emb[:,:-1,:],phone_emb[:,1:,:],dim=-1)*labels_attention_mask[:,1:]
+        #            interphone_loss = torch.sum(inter_phone)/torch.sum(labels_attention_mask[:,1:])
 
-            loss = contrastive_loss + WEIGHT * align_loss + ctc_loss # + interphone_loss
-            # loss = align_loss + ctc_loss # + interphone_loss
+        loss = contrastive_loss + WEIGHT * align_loss + ctc_loss # + interphone_loss
+        # loss = align_loss + ctc_loss # + interphone_loss
+
         # try for oov
         torch.cuda.empty_cache()
         return CausalLMOutput(
@@ -499,10 +499,11 @@ if __name__ == "__main__":
     parser.add_argument('--val_data', default="/root/dataset/speechDataset/Vietnamese/mainfest_for_attention_alignment/dev.tsv", type=str)
     parser.add_argument('--test_data', default=None, type=str)
     parser.add_argument('--weight', type=float, default=1.0)
+    parser.add_argument('--vocab', type=str, default=None)
     parser.add_argument('--sampling_rate', type=float, default=16000)
 
     args = parser.parse_args()
-
+    print(args)
     '''
         Load dataset
         '''
@@ -518,17 +519,17 @@ if __name__ == "__main__":
     SAMPLING_RATE = args.sampling_rate
 
 
-    mapping_phone2id = json.load(open("vocab.json", 'r'))
+    mapping_phone2id = json.load(open(args.vocab, 'r'))
     mapping_id2phone = {v: k for k, v in mapping_phone2id.items()}
 
-    tokenizer = Wav2Vec2CTCTokenizer("vocab.json", unk_token="<unk>", pad_token="<pad>", word_delimiter_token="")
+    tokenizer = Wav2Vec2CTCTokenizer(args.vocab, unk_token="<unk>", pad_token="<pad>", word_delimiter_token="")
     feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1, sampling_rate=16000, padding_value=0.0,
                                                  do_normalize=True, return_attention_mask=False)
     processor = Wav2Vec2Processor(feature_extractor=feature_extractor, tokenizer=tokenizer)
     data_collator = SpeechCollatorWithPadding(processor=processor)
 
     config = Wav2Vec2Config.from_pretrained(args.wav2vec2)
-    bert_config = BertConfig.from_pretrained(Path(args.bert))
+    bert_config = BertConfig.from_pretrained(args.bert)
     config.bert_config = bert_config
     config.pad_token_id = tokenizer.pad_token_id
     config.vocab_size = len(tokenizer)
@@ -551,18 +552,18 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=args.out_dir,
         group_by_length=True,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=16,
-        #                                      evaluation_strategy="steps",
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=32,
+        evaluation_strategy="steps",
         num_train_epochs=20,
-        fp16=True,
-        save_steps=500,
-        #                                      eval_steps=1000,
-        logging_steps=500,
-        learning_rate=3e-5,
+        fp16=False,
+        save_steps=100,
+        eval_steps=100,
+        logging_steps=100,
+        learning_rate=1e-5,
         weight_decay=0.0001,
         warmup_steps=500,
-        save_total_limit=2,
+        save_total_limit=100,
         ignore_data_skip=True,
     )
 
