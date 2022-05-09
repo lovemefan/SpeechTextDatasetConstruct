@@ -321,9 +321,7 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
         )
 
 
-
-
-class Attention(nn.Module):
+class CrossAttention(nn.Module):
 
     def __init__(self, hidden_dim):
         super().__init__()
@@ -346,7 +344,6 @@ class Attention(nn.Module):
         #        att_out = self.layer_norm(att_out + frame_hidden)
 
         return att_out, energy
-
 
 
 class Wav2Vec2ForCTCAndPretraining(Wav2Vec2ForPreTraining):
