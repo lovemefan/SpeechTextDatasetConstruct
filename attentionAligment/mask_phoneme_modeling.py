@@ -3,8 +3,12 @@
 # @Author : lovemefan
 # @Email : lovemefan@outlook.com
 # @File : mask_phoneme_modeling.py
+import logging
 import os
 import sys
+
+import numpy as np
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import re
 from viphoneme import vi2IPA_split
@@ -41,6 +45,9 @@ def get_vi_phones(text):
     return phoneme
 
 
+id_phoneme_pitch_map = {1: 5, 2: 8, 3: 33, 4: 18, 5: 6, 6: 12}
+phoneme_pitch_id_map = {v: k for k, v in id_phoneme_pitch_map.items()}
+
 def convert_into_phoneme_and_tokenizer(batch):
     '''
     convert vietnamese text into phoneme sequence
@@ -51,6 +58,17 @@ def convert_into_phoneme_and_tokenizer(batch):
     [phonemes.append(item) if item != '' else None for item in phoneme.replace('|', '').split(' ')]
     batch['phonemes'] = phonemes
     batch['labels'] = tokenizer.convert_tokens_to_ids(phonemes)
+    phoneme_pitch_ids = np.ones(len(batch['labels']))
+    begin = 0
+    end = 0
+    for j in range(len(batch['labels'])):
+        value = batch['labels'][j]
+        if value in id_phoneme_pitch_map.values():
+            phoneme_pitch_ids[begin:end] *= phoneme_pitch_id_map[value]
+            begin = j
+        else:
+            end = j + 1
+    batch['phoneme_pitch_ids'] = phoneme_pitch_ids
     return batch
 
 
@@ -139,7 +157,8 @@ class DataCollatorMPMWithPadding:
         # different padding methods
         label_features = [{"input_ids": feature["labels"][:self.max_length_labels]} for
                           feature in features]
-
+        phoneme_pitchs = [{"phoneme_pitch_ids": feature["phoneme_pitch_ids"][:self.max_length_labels]} for
+                          feature in features]
         with self.processor.as_target_processor():
             batch = self.processor.pad(
                 label_features,
@@ -156,9 +175,12 @@ class DataCollatorMPMWithPadding:
 
         batch['input_ids'] = inputs
         batch["labels"] = labels
+        phoneme_pitch_ids = torch.zeros_like(batch['input_ids'])
+        for index, item in enumerate(phoneme_pitchs):
+            phoneme_pitch_ids[index, :len(item['phoneme_pitch_ids'])] = torch.Tensor(item['phoneme_pitch_ids'])
 
+        batch["phoneme_pitch_ids"] = phoneme_pitch_ids
         return batch
-
 
 
 mapping_phone2id = json.load(open("vocab.json", 'r'))
@@ -174,6 +196,7 @@ if __name__ == "__main__":
     parser.add_argument('--data_dir', type=str, default='/root/data/dataset/text/vietnamese')
     parser.add_argument('--file', type=str, default='corpus-full-0.2_utf-8_flushed_161w_with_phoneme.txt')
     parser.add_argument('--out_dir', type=str, default="/root/data/dataset/text/vietnamese/bert-phones")
+    parser.add_argument('--phoneme_embedding', action="store_true")
     parser.add_argument('--cache', type=str, default="/root/data/dataset/text/vietnamese/cache/corpus-full-utf-8_flushed_161w.cache")
 
     args = parser.parse_args()
@@ -181,29 +204,36 @@ if __name__ == "__main__":
     # load text dataset
     corpus = load_dataset("text", data_files=[os.path.join(args.data_dir, args.file)])
     print(f"{corpus.shape} samples")
-    corpus = corpus.map(convert_into_phoneme_and_tokenizer,  num_proc=2, cache_file_names={'train': args.cache}, load_from_cache_file=True)
+    corpus = corpus.map(convert_into_phoneme_and_tokenizer,  num_proc=4, cache_file_names={'train': args.cache}, load_from_cache_file=True)
 
     # load model
     config = BertConfig()
     config.vocab_size = len(mapping_phone2id)
-    config.hidden_size = 384
+    config.hidden_size = 768
     config.num_hidden_layers = 4
     config.convbank = [5, 5]
     config.intermediate_size = 768
-    config.withGAU = True
+    # 六个声调加一个0
+    config.phoneme_pitch_count = 7
+    config.withGAU = False
+    config.withPhonemePitchEmbedding = args.phoneme_embedding
+    logging.info(f"phoneme_embedding: {args.phoneme_embedding}")
     model = BertForMaskedPhoneLM(config)
+    total = sum([param.nelement() for param in model.parameters()])
 
+    print(model)
+    print("Number of model parameter: %.2fM" % (total / 1e6))
     data_collator = DataCollatorMPMWithPadding(processor=processor, padding=True)
 
     training_args = TrainingArguments(
         output_dir=args.out_dir,
         # group_by_length=True,
-        per_device_train_batch_size=384,
+        per_device_train_batch_size=128,
         gradient_accumulation_steps=32,
         num_train_epochs=20,
         fp16=True,
-        save_steps=2000,
-        logging_steps=2,
+        save_steps=200,
+        logging_steps=200,
         learning_rate=1e-3,
         weight_decay=0.00001,
         warmup_steps=1000,
