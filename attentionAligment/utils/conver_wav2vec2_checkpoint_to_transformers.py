@@ -59,10 +59,10 @@ MAPPING = {
 }
 TOP_LEVEL_KEYS = [
     "lm_head",
-    "quantizer.weight_proj",
-    "quantizer.codevectors",
-    "project_q",
-    "project_hid",
+    # "quantizer.weight_proj",
+    # "quantizer.codevectors",
+    # "project_q",
+    # "project_hid",
 ]
 
 
@@ -183,10 +183,10 @@ def convert_wav2vec2_checkpoint(
     if config_path is not None:
         config = Wav2Vec2Config.from_pretrained(config_path)
     else:
-        config = Wav2Vec2Config(hidden_size=1024,
-                                num_attention_heads=16,
-                                intermediate_size=4096,
-                                num_hidden_layers=24)
+        # config = Wav2Vec2Config(num_attention_heads=16,
+        #                         intermediate_size=4096,
+        #                         num_hidden_layers=24)
+        config = Wav2Vec2Config()
 
     if is_finetuned:
         model, _, _ = fairseq.checkpoint_utils.load_model_ensemble_and_task(
