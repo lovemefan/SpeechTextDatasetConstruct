@@ -3,14 +3,15 @@
 # @Author : lovemefan
 # @Email : lovemefan@outlook.com
 # @File : attention_alignment_modeling.py
+import logging
 import os
 import sys
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers.file_utils import ModelOutput
 
 from models.AttentionAlignment import Wav2Vec2ForAttentionAlignment
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 import jiwer
@@ -71,6 +72,10 @@ def seq2duration(phones, resolution=0.02):
     return out
 
 
+id_phoneme_pitch_map = {1: 5, 2: 8, 3: 33, 4: 18, 5: 6, 6: 12}
+phoneme_pitch_id_map = {v: k for k, v in id_phoneme_pitch_map.items()}
+
+
 def prepare_dataset(batch):
     # check that all files have the correct sampling rate
     phonemes = []
@@ -80,6 +85,16 @@ def prepare_dataset(batch):
         if char != ' ' or char == "|":
             phonemes.append(char)
     batch['labels'] = phonemes
+    if args.phoneme_embedding:
+        phoneme_pitch_ids = np.ones(len(batch['labels']))
+        for j in range(len(batch['labels'])):
+            value = batch['labels'][j]
+            if value in id_phoneme_pitch_map.values():
+                phoneme_pitch_ids[begin:end] *= phoneme_pitch_id_map[value]
+                begin = j
+            else:
+                end = j + 1
+        batch['phoneme_pitch_ids'] = phoneme_pitch_ids
     return batch
 
 
@@ -132,6 +147,16 @@ class SpeechCollatorWithPadding:
         batch["text_len"] = torch.tensor(text_len)
         batch['labels'] = labels_batch["input_ids"]  # .masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch['labels_attention_mask'] = labels_batch['attention_mask']
+        if args.phoneme_embedding:
+            phoneme_pitch_ids = torch.zeros_like(labels_batch['input_ids'])
+            phoneme_pitchs = [{"phoneme_pitch_ids": feature["phoneme_pitch_ids"][:self.max_length_labels]} for
+                              feature in features]
+            for index, item in enumerate(phoneme_pitchs):
+                phoneme_pitch_ids[index, :len(item['phoneme_pitch_ids'])] = torch.Tensor(item['phoneme_pitch_ids'])
+
+            batch["phoneme_pitch_ids"] = phoneme_pitch_ids
+        else:
+            batch["phoneme_pitch_ids"] = None
         # try for oov
         torch.cuda.empty_cache()
         return batch
@@ -141,21 +166,27 @@ def compute_metrics(pred):
     def decode(ids):
         results = []
         for index in range(ids.shape[0]):
-            results.append("".join([mapping_id2phone.get(i, '<unk>') for i in ids[index]]))
+            result = "".join([mapping_id2phone.get(i, '<unk>') for i in ids[index] if i != 0 and i !=1 and i !=-100])
+            result = re.sub(r"(.*?)\1+", r"\1", result)
+            results.append(result)
         return results
 
     pred_logits = pred.predictions
     pred_ids = np.argmax(pred_logits, axis=-1)
     pred_text = decode(pred_ids)
+    # print(pred_text)
     label = decode(pred.label_ids)
+    # print(label)
     wer = 0
+    cer = 0
     for item in zip(pred_text, label):
         try:
-            wer += jiwer.wer(item[0].replace('|', ''), item[1].replace('|', ''))
+            wer += jiwer.wer(item[0].replace('|', ' '), item[1].replace('|', ' '))
+            cer += jiwer.cer(item[0].replace('|', ' '), item[1].replace('|', ' '))
         except ValueError:
             print(item[0], item[1])
     wer = wer/len(label)
-    return {"phone_wer": wer}
+    return {"phone_wer": wer, "phone_cer": cer}
 
 if __name__ == "__main__":
 
@@ -167,6 +198,7 @@ if __name__ == "__main__":
     parser.add_argument('--bert', type=str, default="/root/data/dataset/text/vietnamese/bert-phones/checkpoint-13000")
     parser.add_argument('--out_dir', type=str, default="./checkpoint/wav2vec2-attention-align")
     parser.add_argument('--restore_from_checkpoint', type=str, default=None)
+    parser.add_argument('--phoneme_embedding', action="store_true")
     parser.add_argument('--vocab', type=str, required=True)
 
     # parser.add_argument('--train_data', type=str,
@@ -213,17 +245,21 @@ if __name__ == "__main__":
     bert_config = BertConfig.from_pretrained(args.bert)
     config.bert_config = bert_config
     config.pad_token_id = tokenizer.pad_token_id
-    config.vocab_size = len(tokenizer)
+    ctc_vocab_size = 156
+    config.vocab_size = ctc_vocab_size
     config.mix_attention = args.mix_attention
-    config.ctc_loss_reduction = 'mean'
+    config.withPhonemePitchEmbedding = args.phoneme_embedding
+    logging.info(f"mix_attention: {args.mix_attention}")
+    config.ctc_loss_reduction = 'sum'
     model = Wav2Vec2ForAttentionAlignment(config, args)
-    model.freeze_feature_extractor()
-    if not args.restore_from_checkpoint:
+
+    if args.restore_from_checkpoint is None:
         model.initialize_phone_model(args.bert)
         model.initialize_wav2vec2_model(args.wav2vec2)
-    else:
-        # avoid TypeError: Object of type BertConfig is not JSON serializable
-        model.config.bert_config = None
+
+    model.freeze_feature_extractor()
+    model.bert.freeze_feature_extractor()
+    model.config.bert_config = None
     total = sum([param.nelement() for param in model.parameters()])
 
     print(model)
@@ -233,14 +269,14 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=args.out_dir,
         group_by_length=True,
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=6,
         gradient_accumulation_steps=16,
         evaluation_strategy="steps",
         num_train_epochs=10,
         fp16=False,
         save_steps=100,
         eval_steps=100,
-        logging_steps=1,
+        logging_steps=100,
         learning_rate=args.lr,
         weight_decay=0.0001,
         warmup_steps=500,

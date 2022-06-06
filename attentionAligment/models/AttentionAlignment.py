@@ -134,21 +134,16 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
         super().__init__(config)
         self.args = args
         self.bert = BertForMaskedPhoneLM(config.bert_config)
-        self.cnn = ConvBank(config.hidden_size, 384, [1], 384, 384, 0.1)
-        # self.quantizer = Wav2Vec2GumbelVectorQuantizer(config)
-        # self.lm_head = nn.Linear(config.hidden_size,config.vocab_size)
-        # self.project_hid = nn.Linear(512, config.proj_codevector_dim)
-        # self.phone_rnn = RNN(384, config.vocab_size)
 
         # make sure that project_hid & project_q are initialized like normal linear layers
         self.project_q = nn.Linear(config.codevector_dim, config.proj_codevector_dim)
-        self.project_hid = nn.Linear(768, config.proj_codevector_dim)
+        self.lm_head = nn.Linear(768, config.vocab_size)
+        self.project_hid = nn.Linear(768*2, config.proj_codevector_dim)
         self.dropout = nn.Dropout(config.final_dropout)
-        self.lm_head = nn.Linear(384, config.vocab_size)
         if config.mix_attention:
-            self.attention = MixedChunkAttention(dim=384)
+            self.attention = MixedChunkAttention(dim=768)
         else:
-            self.attention = CrossAttention(384)
+            self.attention = CrossAttention(768)
         self.align_loss = ForwardSumLoss()
 
     def freeze_wav2vec2(self):
@@ -159,24 +154,24 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
 
         self.bert = BertForMaskedPhoneLM.from_pretrained(path)
         self.config.bert_config = None
-        # self.bert.freeze_feature_extractor()
+        self.bert.freeze_feature_extractor()
 
     def initialize_wav2vec2_model(self, path):
         weights = Wav2Vec2ForCTC.from_pretrained(path).state_dict()
-        del weights['lm_head.weight']
-        del weights['lm_head.bias']
+        # del weights['lm_head.weight']
+        # del weights['lm_head.bias']
         state_dict = self.state_dict()
         weights = {k: v for k, v in weights.items() if k in state_dict.keys()}
         state_dict.update(weights)
 
         self.load_state_dict(state_dict)
-        if self.args.sampling_rate != 32000:
-            self.wav2vec2.feature_extractor.conv_layers[6].conv.stride = (1,)
-            self.config.conv_stride[-1] = 1
+        # if self.args.sampling_rate != 32000:
+        #     self.wav2vec2.feature_extractor.conv_layers[6].conv.stride = (1,)
+        #     self.config.conv_stride[-1] = 1
         self.freeze_feature_extractor()
 
 
-        self.config.num_negatives = 50
+        # self.config.num_negatives = 200
         for param in self.quantizer.parameters():
             param.requires_grad = False
         for param in self.project_q.parameters():
@@ -255,6 +250,7 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
             labels_attention_mask=None,
             text_len=None,
             frame_len=None,
+            phoneme_pitch_ids=None
     ):
 
         outputs = self.wav2vec2(
@@ -268,15 +264,16 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
 
         # acoustic embeddings
         frame_hidden = outputs[0]
-        # frame_hidden = self.dropout(frame_hidden)
-        frame_hidden = self.cnn(frame_hidden)
 
         # phone embeddings
-        phone_hidden = self.bert(input_ids=labels, attention_mask=labels_attention_mask).hidden_states[-1]
+        if phoneme_pitch_ids is None:
+            phone_hidden = self.bert(input_ids=labels, attention_mask=labels_attention_mask, phoneme_pitch_ids=phoneme_pitch_ids).hidden_states[-1]
+        else:
+            phone_hidden = self.bert(input_ids=labels, attention_mask=labels_attention_mask).hidden_states[-1]
 
         # compute cross attention
 
-        att_out, energy = self.attention(frame_hidden, phone_hidden, phone_hidden, mask=labels_attention_mask)
+        att_out, energy = self.attention(frame_hidden, phone_hidden, frame_hidden, mask=labels_attention_mask)
 
         # start masked modeling
         # 0. remove the blank symbol
@@ -304,10 +301,9 @@ class Wav2Vec2ForAttentionAlignment(Wav2Vec2ForPreTraining):
         with torch.backends.cudnn.flags(enabled=False):
             ctc_loss = nn.functional.ctc_loss(
                 log_probs,
-                labels.masked_select(labels_attention_mask),
+                labels.masked_select(labels_attention_mask==1),
                 input_lengths,
                 target_lengths,
-                blank=self.config.pad_token_id,
                 reduction=self.config.ctc_loss_reduction,
                 zero_infinity=self.config.ctc_zero_infinity,
             )
@@ -450,7 +446,7 @@ class CrossAttention(nn.Module):
         energy = energy + attention_mask.unsqueeze(1).repeat(1, energy.size(1), 1)
 
         att_matrix = torch.softmax(energy, dim=-1)
-        att_out = torch.bmm(att_matrix, v)
+        att_out = torch.bmm(att_matrix, k)
         att_out = torch.cat([att_out, frame_hidden], dim=-1)
         #        att_out = self.layer_norm(att_out + frame_hidden)
 
